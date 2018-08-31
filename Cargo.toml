@@ -1,0 +1,18 @@
+[package]
+name = "smallvectune"
+version = "0.0.1"
+authors = ["Andre Bogus <bogusandre@gmail.com>"]
+license = "MIT/Apache-2.0"
+repository = "https://github.com/llogiq/smallvectune"
+description = "Wrapper for SmallVec that writes out capacity information"
+keywords = ["small", "vec", "vector", "stack", "no_std", "tuning"]
+categories = ["data-structures"]
+
+[features]
+std = ["smallvec/std"]
+union = ["smallvec/union"]
+default = ["std"]
+
+[dependencies]
+smallvec = "0.6.5"
+
