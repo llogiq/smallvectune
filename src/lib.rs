@@ -15,7 +15,7 @@ use smallvec::SmallVec as SV;
 
 //TODO set up an MPSC channel to deal w/ multithreaded applications
 fn log(size: usize, addrem: char, capacity: usize) {
-    pritnln!("{};{};{}", size, addrem, capacity);
+    println!("{};{};{}", size, addrem, capacity);
 }
 
 // reporting
