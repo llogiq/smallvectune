@@ -7,7 +7,7 @@ use smallvectune::SmallVec;
 fn main() {
     let mut x: SmallVec<[SmallVec<[u8; 2]>; 1]> = SmallVec::new();
     let mut rng = rand::thread_rng();
-    for _ in 1..1000 {
+    for _ in 0..1000 {
         match rng.gen_range(0, 3) {
             0 => x.push(SmallVec::new()),
             1 => {
@@ -19,6 +19,7 @@ fn main() {
                 }
             }
             2 => {
+                if x.is_empty() { continue; }
                 let idx = { rng.gen_range(0, x.len()) };
                 if x[idx].pop().is_none() {
                     x.pop();

@@ -9,6 +9,8 @@ repository = "https://github.com/llogiq/smallvectune"
 version = "0.0.1"
 
 [dependencies]
+crossbeam-channel = "0.2.5"
+lazy_static = "1.0"
 smallvec = "0.6.5"
 
 [dev-dependencies]

@@ -7,25 +7,18 @@
 //! of `extern crate smallvec; use smallvec::SmallVec`.
 
 extern crate smallvec;
-use std::{fmt, io, mem, ops};
-use std::iter::{FromIterator};
+extern crate crossbeam_channel;
+#[macro_use]
+extern crate lazy_static;
+
+use std::{fmt, fs, mem, ops, thread};
 use std::borrow::{Borrow, BorrowMut};
+use std::io::{self, Write, BufWriter};
+use std::iter::FromIterator;
+use std::path::Path;
+
 pub use smallvec::{Array, Drain, ExtendFromSlice, IntoIter};
 use smallvec::SmallVec as SV;
-
-//TODO set up an MPSC channel to deal w/ multithreaded applications
-fn log(component_size: usize, size: usize, addrem: char, capacity: usize) {
-    println!("{};{};{};{}", component_size, size, addrem, capacity);
-}
-
-// reporting
-fn add(component_size: usize, size: usize, capacity: usize) {
-    log(component_size, size, '+', capacity);
-}
-
-fn remove(component_size: usize, size: usize, capacity: usize) {
-    log(component_size, size, '-', capacity);
-}
 
 // public API
 #[macro_export]
@@ -443,4 +436,77 @@ impl<A: Array> Clone for SmallVec<A> where A::Item: Clone {
         add(mem::size_of::<A::Item>(), A::size(), self.capacity());
         SmallVec(self.0.clone())
     }
+}
+
+struct Sizing {
+    item_size: usize,
+    array_size: usize,
+    capacity: usize,
+}
+
+enum Message {
+    Add(Sizing),
+    Remove(Sizing),
+    Quit // unused for now
+}
+
+lazy_static! {
+    static ref LOG : (crossbeam_channel::Sender<Message>,
+                      thread::JoinHandle<()>) = spawn_logger_thread();
+}
+
+pub struct Log;
+
+impl Drop for Log {
+    fn drop(&mut self) {
+        LOG.0.send(Message::Quit);
+        LOG.1.join();
+    }
+}
+
+/// Use this with `let _log = with_log();` in your main method to flush the log
+/// and exit the logger thread on program exit
+pub fn with_log() -> Log { Log }
+
+fn line(w: &mut BufWriter<fs::File>, sizing: Sizing, addrem: char) {
+    let Sizing { item_size, array_size, capacity } = sizing;
+    writeln!(w, "{};{};{};{}", item_size, array_size, addrem, capacity);
+    w.flush();
+}
+
+fn spawn_logger_thread() -> crossbeam_channel::Sender<Message> {
+    let out = std::env::var("SMALLVECTUNE_OUT")
+        .expect("Please set SMALLVECTUNE_OUT=path/to/out.csv");
+    let path: &Path = Path::new(&out);
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).expect("Could not create output directory");
+    }
+    let file = fs::File::create(path)
+        .expect("Could not create output file");
+    let buf_writer = BufWriter::new(file);
+    let (s, r) = crossbeam_channel::bounded(128); // should be enough
+    let join = thread::spawn(move || {
+        let mut buf = buf_writer;
+        loop {
+            let buf = &mut buf;
+            match r.recv() {
+                Some(Message::Add(sizing)) => line(buf, sizing, '+'),
+                Some(Message::Remove(sizing)) => line(buf, sizing, '-'),
+                Some(Message::Quit) | None => {
+                    let _ = buf.flush();
+                    break
+                }
+            }
+        }
+        drop(buf);
+    });
+    (s, join)
+}
+
+fn add(item_size: usize, array_size: usize, capacity: usize) {
+    LOG.0.send(Message::Add(Sizing { item_size, array_size, capacity }));
+}
+
+fn remove(item_size: usize, array_size: usize, capacity: usize) {
+    LOG.0.send(Message::Remove(Sizing { item_size, array_size, capacity }));
 }
