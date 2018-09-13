@@ -27,9 +27,8 @@ the following log (here annotated for clarity):
 # Usage
 
 In your `Cargo.toml`, replace your `smallvec` dependency with `smallvectune`. Then
-you need to `use smallvectune::SmallVec` istead of `smallvec::SmallVec`. It's also
-a good idea to call `let _log = smallvectune::with_log()` in your `main` method,
-otherwise some entries may be lost.
+in your lib.rs (or main.rs), replace `extern crate smallvec;` with
+`extern crate smallvectune as smallvec;`.
 
 Calling your code, you'll have to set the `SMALLVECTUNE_OUT` environment variable
 to a valid path to write to. This is where the log will be written. 

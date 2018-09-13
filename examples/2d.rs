@@ -1,8 +1,8 @@
-extern crate smallvectune;
+extern crate smallvectune as smallvec;
 extern crate rand;
 
 use rand::Rng;
-use smallvectune::SmallVec;
+use smallvec::SmallVec;
 
 fn main() {
     let mut x: SmallVec<[SmallVec<[u8; 2]>; 1]> = SmallVec::new();
