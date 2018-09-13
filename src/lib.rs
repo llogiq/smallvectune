@@ -16,6 +16,7 @@ use std::borrow::{Borrow, BorrowMut};
 use std::io::{self, Write, BufWriter};
 use std::iter::FromIterator;
 use std::path::Path;
+use std::sync::Mutex;
 
 pub use smallvec::{Array, Drain, ExtendFromSlice, IntoIter};
 use smallvec::SmallVec as SV;
@@ -450,9 +451,38 @@ enum Message {
     Quit // unused for now
 }
 
+pub struct Logger(crossbeam_channel::Sender<Message>,
+                  Mutex<Option<thread::JoinHandle<()>>>);
+
 lazy_static! {
-    static ref LOG : (crossbeam_channel::Sender<Message>,
-                      thread::JoinHandle<()>) = spawn_logger_thread();
+    static ref LOG: Logger = {
+        let out = std::env::var("SMALLVECTUNE_OUT")
+            .expect("Please set SMALLVECTUNE_OUT=path/to/out.csv");
+        let path: &Path = Path::new(&out);
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).expect("Could not create output directory");
+        }
+        let file = fs::File::create(path)
+            .expect("Could not create output file");
+        let buf_writer = BufWriter::new(file);
+        let (s, r) = crossbeam_channel::bounded(128); // should be enough
+        let join = thread::spawn(move || {
+            let mut buf = buf_writer;
+            loop {
+                let buf = &mut buf;
+                match r.recv() {
+                    Some(Message::Add(sizing)) => line(buf, sizing, '+'),
+                    Some(Message::Remove(sizing)) => line(buf, sizing, '-'),
+                    Some(Message::Quit) | None => {
+                        let _ = buf.flush();
+                        break
+                    }
+                }
+            }
+            drop(buf);
+        });
+        Logger(s, Mutex::new(Some(join)))
+    };
 }
 
 pub struct Log;
@@ -460,7 +490,10 @@ pub struct Log;
 impl Drop for Log {
     fn drop(&mut self) {
         LOG.0.send(Message::Quit);
-        LOG.1.join();
+        let mut lock = LOG.1.lock().unwrap();
+        if let Some(j) = lock.take() {
+            let _ = j.join();
+        }
     }
 }
 
@@ -471,36 +504,7 @@ pub fn with_log() -> Log { Log }
 fn line(w: &mut BufWriter<fs::File>, sizing: Sizing, addrem: char) {
     let Sizing { item_size, array_size, capacity } = sizing;
     writeln!(w, "{};{};{};{}", item_size, array_size, addrem, capacity);
-    w.flush();
-}
-
-fn spawn_logger_thread() -> crossbeam_channel::Sender<Message> {
-    let out = std::env::var("SMALLVECTUNE_OUT")
-        .expect("Please set SMALLVECTUNE_OUT=path/to/out.csv");
-    let path: &Path = Path::new(&out);
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).expect("Could not create output directory");
-    }
-    let file = fs::File::create(path)
-        .expect("Could not create output file");
-    let buf_writer = BufWriter::new(file);
-    let (s, r) = crossbeam_channel::bounded(128); // should be enough
-    let join = thread::spawn(move || {
-        let mut buf = buf_writer;
-        loop {
-            let buf = &mut buf;
-            match r.recv() {
-                Some(Message::Add(sizing)) => line(buf, sizing, '+'),
-                Some(Message::Remove(sizing)) => line(buf, sizing, '-'),
-                Some(Message::Quit) | None => {
-                    let _ = buf.flush();
-                    break
-                }
-            }
-        }
-        drop(buf);
-    });
-    (s, join)
+    let _ = w.flush(); // nothing to do about errors here
 }
 
 fn add(item_size: usize, array_size: usize, capacity: usize) {
