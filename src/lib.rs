@@ -13,7 +13,7 @@ extern crate lazy_static;
 
 use std::{fmt, fs, mem, ops, thread};
 use std::borrow::{Borrow, BorrowMut};
-use std::io::{self, Write, BufWriter};
+use std::io::{Write, BufWriter};
 use std::iter::FromIterator;
 use std::path::Path;
 use std::sync::Mutex;
