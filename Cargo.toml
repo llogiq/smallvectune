@@ -2,7 +2,7 @@
 authors = ["Andre Bogus <bogusandre@gmail.com>"]
 categories = ["data-structures"]
 description = "Wrapper for SmallVec that writes out capacity information"
-keywords = ["small", "vec", "vector", "stack", "no_std", "tuning"]
+keywords = ["small", "vec", "vector", "stack", "tuning"]
 license = "MIT/Apache-2.0"
 name = "smallvectune"
 repository = "https://github.com/llogiq/smallvectune"
