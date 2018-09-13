@@ -1,0 +1,7 @@
+language: rust
+sudo: false
+script:
+    - set -e
+    - SMALLVECTUNE_OUT=min.csv cargo run --no-default-features --example 2d
+    - SMALLVECTUNE_OUT=max.csv cargo run --all-features --example 2d
+    - diff -q min.csv max.csv
