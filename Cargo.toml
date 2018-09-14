@@ -17,6 +17,7 @@ smallvec = "0.6.5"
 rand = "0.5.5"
 
 [features]
-default = ["std"]
+id = []
+default = ["std", "id"]
 std = ["smallvec/std"]
 union = ["smallvec/union"]

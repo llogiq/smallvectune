@@ -13,7 +13,7 @@ extern crate lazy_static;
 
 use std::{fmt, fs, mem, ops, thread};
 use std::borrow::{Borrow, BorrowMut};
-use std::io::{Write, BufWriter};
+use std::io::{self, Write, BufWriter};
 use std::iter::FromIterator;
 use std::path::Path;
 use std::sync::Mutex;
@@ -41,8 +41,30 @@ macro_rules! smallvec {
     });
 }
 
+#[cfg(not(feature = "id"))]
+mod id {
+    pub type Id = ();
+    pub fn next_id() -> Id { }
+    pub fn write_id(w: &mut BufWriter<fs::File>, id: Id) { }
+}
+
+#[cfg(feature = "id")]
+mod id {
+    use std::fs;
+    use std::io::{Write, BufWriter};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    static ID: AtomicUsize = AtomicUsize::new(0);
+
+    pub type Id = usize;
+    pub fn next_id() -> Id { ID.fetch_add(1, Ordering::SeqCst) }
+    pub fn write_id(w: &mut BufWriter<fs::File>, id: Id) { write!(w, "{};", id); }
+}
+
+use id::*;
+
 /// Our wrapped SmalLVec type
-pub struct SmallVec<A: Array>(SV<A>);
+pub struct SmallVec<A: Array>(SV<A>, Id);
 
 macro_rules! delegate {
     { $name:ident ( $($arg:ident : $ty:ty),* ) } => {
@@ -66,10 +88,7 @@ macro_rules! delegate_mut {
             let previous_cap = self.0.capacity();
             let result = self . 0 . $name($($arg,)*);
             let new_cap = self.0.capacity();
-            if new_cap != previous_cap {
-                add(mem::size_of::<A::Item>(), A::size(), new_cap);
-                remove(mem::size_of::<A::Item>(), A::size(), previous_cap);
-            }
+            resize(self.1, mem::size_of::<A::Item>(), A::size(), previous_cap, new_cap);
             result
         }
     };
@@ -78,38 +97,36 @@ macro_rules! delegate_mut {
 impl<A: Array> SmallVec<A> {
     #[inline]
     pub fn new() -> SmallVec<A> {
-        add(mem::size_of::<A::Item>(), A::size(), 0);
-        SmallVec(SV::new())
+        SmallVec(SV::new(), hi(mem::size_of::<A::Item>(), A::size(), 0))
     }
 
     #[inline]
     pub fn with_capacity(cap: usize) -> SmallVec<A> {
-        add(mem::size_of::<A::Item>(), A::size(), cap);
-        SmallVec(SV::with_capacity(cap))
+        SmallVec(SV::with_capacity(cap), hi(mem::size_of::<A::Item>(), A::size(), cap))
     }
 
     #[inline]
     pub fn from_vec(vec: Vec<A::Item>) -> SmallVec<A> {
-        add(mem::size_of::<A::Item>(), A::size(), vec.capacity());
-        SmallVec(SV::from_vec(vec))
+        let sv = SV::from_vec(vec);
+        let capacity = sv.capacity();
+        SmallVec(sv, hi(mem::size_of::<A::Item>(), A::size(), capacity))
     }
 
     #[inline]
     pub fn from_buf(buf: A) -> SmallVec<A> {
-        add(mem::size_of::<A::Item>(), A::size(), A::size());
-        SmallVec(SV::from_buf(buf))
+        SmallVec(SV::from_buf(buf), hi(mem::size_of::<A::Item>(), A::size(), A::size()))
     }
 
     #[inline]
     pub fn from_buf_and_len(buf: A, len: usize) -> SmallVec<A> {
-        add(mem::size_of::<A::Item>(), A::size(), A::size());
-        SmallVec(SV::from_buf_and_len(buf, len))
+        SmallVec(SV::from_buf_and_len(buf, len),
+                 hi(mem::size_of::<A::Item>(), A::size(), A::size()))
     }
 
     #[inline]
     pub unsafe fn from_buf_and_len_unchecked(buf: A, len: usize) -> SmallVec<A> {
-        add(mem::size_of::<A::Item>(), A::size(), A::size());
-        SmallVec(SV::from_buf_and_len_unchecked(buf, len))
+        SmallVec(SV::from_buf_and_len_unchecked(buf, len),
+                 hi(mem::size_of::<A::Item>(), A::size(), A::size()))
     }
 
     #[inline]
@@ -129,7 +146,7 @@ impl<A: Array> SmallVec<A> {
 
     #[inline]
     pub fn drain(&mut self) -> Drain<A::Item> {
-        remove(mem::size_of::<A::Item>(), A::size(), self.0.capacity());
+        bye(self.1, mem::size_of::<A::Item>(), A::size(), self.0.capacity());
         self.0.drain()
     }
 
@@ -179,16 +196,13 @@ impl<A: Array> SmallVec<A> {
         let previous_cap = self.0.capacity();
         let result = self.0.insert_many(index, iterable);
         let new_cap = self.0.capacity();
-        if new_cap != previous_cap {
-            add(mem::size_of::<A::Item>(), A::size(), new_cap);
-            remove(mem::size_of::<A::Item>(), A::size(), previous_cap);
-        }
+        resize(self.1, mem::size_of::<A::Item>(), A::size(), previous_cap, new_cap);
         result
     }
 
     #[inline]
     pub fn into_vec(mut self) -> Vec<A::Item> {
-        remove(mem::size_of::<A::Item>(), A::size(), self.0.capacity());
+        bye(self.1, mem::size_of::<A::Item>(), A::size(), self.0.capacity());
         let sv = mem::replace(&mut self.0, SV::new());
         mem::forget(self);
         sv.into_vec()
@@ -196,14 +210,14 @@ impl<A: Array> SmallVec<A> {
 
     #[inline]
     pub fn into_inner(mut self) -> Result<A, Self> {
-        let sv = mem::replace(&mut self.0, SV::new());
+        let (sv, id) = (mem::replace(&mut self.0, SV::new()), self.1);
         mem::forget(self);
         match sv.into_inner() {
             Ok(a) => {
-                remove(mem::size_of::<A::Item>(), A::size(), A::size());
+                bye(id, mem::size_of::<A::Item>(), A::size(), A::size());
                 Ok(a)
             }
-            Err(s) => Err(SmallVec(s))
+            Err(s) => Err(SmallVec(s, id))
         }
     }
 
@@ -236,9 +250,9 @@ impl<A: Array> SmallVec<A> {
 impl<A: Array> SmallVec<A> where A::Item: Copy {
     #[inline]
     pub fn from_slice(slice: &[A::Item]) -> Self {
-        let result = SV::from_slice(slice);
-        add(mem::size_of::<A::Item>(), A::size(), result.capacity());
-        SmallVec(result)
+        let sv = SV::from_slice(slice);
+        let capacity = sv.capacity();
+        SmallVec(sv, hi(mem::size_of::<A::Item>(), A::size(), capacity))
     }
 
     delegate_mut! { insert_from_slice(index: usize, slice: &[A::Item]) }
@@ -250,9 +264,9 @@ impl<A: Array> SmallVec<A> where A::Item: Clone {
 
     #[inline]
     pub fn from_elem(elem: A::Item, n: usize) -> Self {
-        let result = SV::from_elem(elem, n);
-        add(mem::size_of::<A::Item>(), A::size(), result.capacity());
-        SmallVec(result)
+        let sv = SV::from_elem(elem, n);
+        let capacity = sv.capacity();
+        SmallVec(sv, hi(mem::size_of::<A::Item>(), A::size(), capacity))
     }
 }
 
@@ -306,10 +320,7 @@ impl<A: Array<Item = u8>> io::Write for SmallVec<A> {
         let previous_cap = self.0.capacity();
         let result = self.0.write(buf);
         let new_cap = self.0.capacity();
-        if new_cap != previous_cap {
-            add(mem::size_of::<A::Item>(), A::size(), new_cap);
-            remove(mem::size_of::<A::Item>(), A::size(), previous_cap);
-        }
+        resize(self.1, mem::size_of::<A::Item>(), A::size(), previous_cap, new_cap);
         result
     }
 
@@ -318,10 +329,7 @@ impl<A: Array<Item = u8>> io::Write for SmallVec<A> {
         let previous_cap = self.0.capacity();
         let result = self.0.write_all(buf);
         let new_cap = self.0.capacity();
-        if new_cap != previous_cap {
-            add(mem::size_of::<A::Item>(), A::size(), new_cap);
-            remove(mem::size_of::<A::Item>(), A::size(), previous_cap);
-        }
+        resize(self.1, mem::size_of::<A::Item>(), A::size(), previous_cap, new_cap);
         result
     }
 
@@ -341,16 +349,18 @@ impl<A: Array> Serialize for SmallVec<A> where A::Item: Serialize {
 #[cfg(feature = "serde")]
 impl<'de, A: Array> Deserialize<'de> for SmallVec<A> where A::Item: Deserialize<'de> {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        SmallVec(SV::deserialize(deserializer))
+        let sv = SV::deserialize(deserializer);
+        let capacity = sv.capacity();
+        SmallVec(sv, hi(mem::size_of::<A::Item>(), A::size(), capacity))
     }
 }
 
 impl<A: Array, T> From<T> for SmallVec<A> where T: Into<SV<A>> {
     #[inline]
     fn from(t: T) -> SmallVec<A> {
-        let result = t.into();
-        add(mem::size_of::<A::Item>(), A::size(), result.capacity());
-        SmallVec(result)
+        let sv = t.into();
+        let capacity = sv.capacity();
+        SmallVec(sv, hi(mem::size_of::<A::Item>(), A::size(), capacity))
     }
 }
 
@@ -385,19 +395,16 @@ impl<A: Array> ExtendFromSlice<A::Item> for SmallVec<A> where A::Item: Copy {
         let previous_cap = self.0.capacity();
         self.0.extend_from_slice(slice);
         let new_cap = self.0.capacity();
-        if new_cap != previous_cap {
-            add(mem::size_of::<A::Item>(), A::size(), new_cap);
-            remove(mem::size_of::<A::Item>(), A::size(), previous_cap);
-        }
+        resize(self.1, mem::size_of::<A::Item>(), A::size(), previous_cap, new_cap);
     }
 }
 
 impl<A: Array> FromIterator<A::Item> for SmallVec<A> {
     #[inline]
     fn from_iter<I: IntoIterator<Item=A::Item>>(iterable: I) -> SmallVec<A> {
-        let result = SV::from_iter(iterable);
-        add(mem::size_of::<A::Item>(), A::size(), result.capacity());
-        SmallVec(result)
+        let sv = SV::from_iter(iterable);
+        let capacity = sv.capacity();
+        SmallVec(sv, hi(mem::size_of::<A::Item>(), A::size(), capacity))
     }
 }
 
@@ -406,10 +413,7 @@ impl<A: Array> Extend<A::Item> for SmallVec<A> {
         let previous_cap = self.0.capacity();
         self.0.extend(iterable);
         let new_cap = self.0.capacity();
-        if new_cap != previous_cap {
-            add(mem::size_of::<A::Item>(), A::size(), new_cap);
-            remove(mem::size_of::<A::Item>(), A::size(), previous_cap);
-        }
+        resize(self.1, mem::size_of::<A::Item>(), A::size(), previous_cap, new_cap);
     }
 }
 
@@ -428,27 +432,28 @@ impl<A: Array> Default for SmallVec<A> {
 
 impl<A: Array> Drop for SmallVec<A> {
     fn drop(&mut self) {
-        remove(mem::size_of::<A::Item>(), A::size(), self.capacity());
+        bye(self.1, mem::size_of::<A::Item>(), A::size(), self.capacity());
     }
 }
 
 impl<A: Array> Clone for SmallVec<A> where A::Item: Clone {
     fn clone(&self) -> SmallVec<A> {
-        add(mem::size_of::<A::Item>(), A::size(), self.capacity());
-        SmallVec(self.0.clone())
+        SmallVec(self.0.clone(),
+                 hi(mem::size_of::<A::Item>(), A::size(), self.capacity()))
     }
 }
 
-struct Sizing {
+struct ArrayInfo {
+    id: Id,
     item_size: usize,
     array_size: usize,
-    capacity: usize,
 }
 
 enum Message {
-    Add(Sizing),
-    Remove(Sizing),
-    Quit // unused for now
+    New(ArrayInfo, usize),
+    Resize(ArrayInfo, usize, usize),
+    Drop(ArrayInfo, usize),
+    Quit
 }
 
 pub struct Logger(crossbeam_channel::Sender<Message>,
@@ -460,7 +465,8 @@ lazy_static! {
             .expect("Please set SMALLVECTUNE_OUT=path/to/out.csv");
         let path: &Path = Path::new(&out);
         if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent).expect("Could not create output directory");
+            fs::create_dir_all(parent)
+                .expect("Could not create output directory");
         }
         let file = fs::File::create(path)
             .expect("Could not create output file");
@@ -471,8 +477,13 @@ lazy_static! {
             loop {
                 let buf = &mut buf;
                 match r.recv() {
-                    Some(Message::Add(sizing)) => line(buf, sizing, '+'),
-                    Some(Message::Remove(sizing)) => line(buf, sizing, '-'),
+                    Some(Message::New(info, cap)) =>
+                        line(buf, info, '+', None, Some(cap)),
+                    Some(Message::Drop(info, cap)) =>
+                        line(buf, info, '-', Some(cap), None),
+                    Some(Message::Resize(info, previous_cap, new_cap)) => {
+                        line(buf, info, ' ', Some(previous_cap), Some(new_cap))
+                    }
                     Some(Message::Quit) | None => {
                         let _ = buf.flush();
                         break
@@ -501,16 +512,48 @@ impl Drop for Log {
 /// and exit the logger thread on program exit
 pub fn with_log() -> Log { Log }
 
-fn line(w: &mut BufWriter<fs::File>, sizing: Sizing, addrem: char) {
-    let Sizing { item_size, array_size, capacity } = sizing;
-    writeln!(w, "{};{};{};{}", item_size, array_size, addrem, capacity);
+fn write_opt(w: &mut BufWriter<fs::File>, o: Option<usize>, c: &str) {
+    match o {
+        Some(value) => { let _ = write!(w, "{}{}", value, c); }
+        None => { let _ = w.write(c.as_bytes()); }
+    }
+}
+
+fn line(w: &mut BufWriter<fs::File>,
+        info: ArrayInfo,
+        addrem: char,
+        previous_cap: Option<usize>,
+        new_cap: Option<usize>) {
+    let ArrayInfo { id, item_size, array_size } = info;
+    write_id(w, id);
+    write!(w, "{};{};{};", item_size, array_size, addrem);
+    write_opt(w, previous_cap, ";");
+    write_opt(w, new_cap, "\n");
     let _ = w.flush(); // nothing to do about errors here
 }
 
-fn add(item_size: usize, array_size: usize, capacity: usize) {
-    LOG.0.send(Message::Add(Sizing { item_size, array_size, capacity }));
+fn send(message: Message) {
+    LOG.0.send(message);
 }
 
-fn remove(item_size: usize, array_size: usize, capacity: usize) {
-    LOG.0.send(Message::Remove(Sizing { item_size, array_size, capacity }));
+fn hi(item_size: usize, array_size: usize, capacity: usize) -> Id {
+    let id = next_id();
+    send(Message::New(ArrayInfo { id, item_size, array_size }, capacity));
+    id
+}
+
+fn resize(id: Id,
+          item_size: usize,
+          array_size: usize,
+          previous_capacity: usize,
+          new_capacity: usize) {
+    if new_capacity != previous_capacity {
+        send(Message::Resize(ArrayInfo { id, item_size, array_size },
+                             previous_capacity,
+                             new_capacity));
+    }
+}
+
+fn bye(id: Id, item_size: usize, array_size: usize, capacity: usize) {
+    send(Message::Drop(ArrayInfo { id, item_size, array_size }, capacity));
 }
