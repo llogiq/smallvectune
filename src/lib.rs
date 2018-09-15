@@ -13,7 +13,7 @@ extern crate lazy_static;
 
 use std::{fmt, fs, mem, ops, thread};
 use std::borrow::{Borrow, BorrowMut};
-use std::io::{self, Write, BufWriter};
+use std::io::{Write, BufWriter};
 use std::iter::FromIterator;
 use std::path::Path;
 use std::sync::Mutex;
@@ -43,9 +43,12 @@ macro_rules! smallvec {
 
 #[cfg(not(feature = "id"))]
 mod id {
+    use std::fs;
+    use std::io::BufWriter;
+
     pub type Id = ();
     pub fn next_id() -> Id { }
-    pub fn write_id(w: &mut BufWriter<fs::File>, id: Id) { }
+    pub fn write_id(_w: &mut BufWriter<fs::File>, _id: Id) { }
 }
 
 #[cfg(feature = "id")]
@@ -312,6 +315,9 @@ impl<A: Array> BorrowMut<[A::Item]> for SmallVec<A> {
         self
     }
 }
+
+#[cfg(feature = "std")]
+use std::io;
 
 #[cfg(feature = "std")]
 impl<A: Array<Item = u8>> io::Write for SmallVec<A> {
